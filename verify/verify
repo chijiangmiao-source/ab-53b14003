@@ -1,0 +1,233 @@
+#!/usr/bin/env node
+// 一次性验收服务 verify：
+//   1) 引擎代码测试（单元测试）
+//   2) 业务场景复核（联合多数 / 配置阶段 / 非法截断 / 前驱缺失）
+//   3) 页面构建检查
+//   4) HTTP 冒烟（/health 与静态资源；BASE_URL 未设置时自行拉起 server.js）
+// 全部通过退出码 0，任一失败退出码 1。
+import { spawn } from 'node:child_process';
+import { access, readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import process from 'node:process';
+import { replay } from '../src/engine.js';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SMOKE_PORT = process.env.SMOKE_PORT || '18080';
+const BASE_URL = process.env.BASE_URL || '';
+
+let failures = 0;
+const log = {
+  step: (n, m) => console.log(`\n[verify ${n}/4] ${m}`),
+  ok: (m) => console.log(`  ✔ ${m}`),
+  bad: (m) => { failures += 1; console.error(`  ✘ ${m}`); },
+};
+
+function run(cmd, args, env = {}) {
+  return new Promise((res, rej) => {
+    const p = spawn(cmd, args, { cwd: ROOT, env: { ...process.env, ...env } });
+    let out = '';
+    let err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('error', rej);
+    p.on('close', (code) => res({ code, out, err }));
+  });
+}
+
+const J = (neu, term = 1) => ({ term, config: { kind: 'joint', new: neu } });
+const F = (nodes, term = 1) => ({ term, config: { kind: 'final', nodes } });
+const R = (target, prevLogIndex, prevLogTerm, entries) =>
+  ({ type: 'replicate', target, prevLogIndex, prevLogTerm, entries });
+const C = (index) => ({ type: 'commit', index });
+
+function expect(cond, name, detail = '') {
+  if (cond) log.ok(name);
+  else log.bad(`${name}${detail ? ` —— ${detail}` : ''}`);
+}
+
+// ---------- 1) 代码测试 ----------
+log.step(1, '引擎代码测试');
+{
+  const r = await run('node', ['test/engine.test.mjs']);
+  if (r.code === 0) log.ok('单元测试全部通过');
+  else log.bad('单元测试存在失败', r.err || r.out);
+}
+
+// ---------- 2) 业务场景复核 ----------
+log.step(2, '业务场景复核（联合多数与配置阶段）');
+{
+  // 场景 A：3→4 完整联合变更通过，双侧多数节点可定位
+  const a = replay({
+    nodes: ['a', 'b', 'c'],
+    events: [
+      R('a', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+      R('b', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+      R('d', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+      C(1),
+      R('a', 1, 1, [F(['a', 'b', 'c', 'd'])]),
+      R('b', 1, 1, [F(['a', 'b', 'c', 'd'])]),
+      R('d', 1, 1, [F(['a', 'b', 'c', 'd'])]),
+      C(2),
+    ],
+  });
+  expect(a.ok, '场景A 联合变更 happy path 通过', a.failure && a.failure.message);
+  const jointCheck = a.snapshots[3].detail.checks[0];
+  expect(jointCheck.oldMatched.length === 2 && jointCheck.newMatched.length === 3,
+    '场景A joint 提交同时取得旧集合多数(2/3)与新集合多数(3/4)',
+    JSON.stringify({ old: jointCheck.oldMatched, neu: jointCheck.newMatched }));
+  expect(a.snapshots[3].phase.mode === 'joint' && a.snapshots[7].phase.mode === 'stable',
+    '场景A 提交 joint 生效、提交 final 后回到 stable');
+
+  // 场景 B：旧集合多数缺失 -> quorum，定位缺失节点
+  const b = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('d', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    C(1),
+  ] });
+  expect(!b.ok && b.failure.category === 'quorum', '场景B 缺旧集合多数被拒');
+  expect(b.failure.check.oldMatched.length === 1 && b.failure.check.oldMissing.includes('b') && b.failure.check.oldMissing.includes('c'),
+    '场景B 定位缺失的旧集合匹配副本 b,c');
+
+  // 场景 C：新集合多数缺失（4 节点需 3，只有 a,b）
+  const c3 = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('b', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('d', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    C(1),
+    R('a', 1, 1, [{ term: 1 }]),
+    R('b', 1, 1, [{ term: 1 }]),
+    C(2),
+  ] });
+  expect(!c3.ok && c3.failure.category === 'quorum' && c3.failure.check.index === 2,
+    '场景C joint 生效期间普通条目仍需双侧多数');
+  expect(c3.failure.check.newMatched.length === 2, '场景C 定位新集合仅 a,b 匹配（需 3/4）');
+
+  // 场景 D：final 先于 joint 提交 -> phase
+  const d = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [F(['a', 'b', 'c', 'd'])]),
+    R('b', 0, 0, [F(['a', 'b', 'c', 'd'])]),
+    C(1),
+  ] });
+  expect(!d.ok && d.failure.category === 'phase', '场景D 未提交 joint 不得提交 final（错误配置阶段）');
+
+  // 场景 E：joint 生效期间再开 joint -> phase
+  const e = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('b', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('d', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    C(1),
+    R('a', 1, 1, [J(['a', 'b', 'c', 'd', 'x'])]),
+  ] });
+  expect(!e.ok && e.failure.category === 'phase', '场景E joint 生效期间不得开启第二次 joint');
+
+  // 场景 F：final 集合与 joint.new 不一致 -> phase
+  const f = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('b', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    R('d', 0, 0, [J(['a', 'b', 'c', 'd'])]),
+    C(1),
+    R('a', 1, 1, [F(['a', 'b', 'x'])]),
+    R('b', 1, 1, [F(['a', 'b', 'x'])]),
+    R('x', 0, 0, [J(['a', 'b', 'c', 'd']), F(['a', 'b', 'x'])]),
+    C(2),
+  ] });
+  expect(!f.ok && f.failure.category === 'phase', '场景F final 集合必须等于 joint.new');
+
+  // 场景 G：覆盖已提交项 -> truncate，且失败事件不落盘
+  const g = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('a', 0, 0, [{ term: 1 }]),
+    R('b', 0, 0, [{ term: 1 }]),
+    C(1),
+    R('b', 0, 0, [{ term: 2 }]),
+  ] });
+  expect(!g.ok && g.failure.category === 'truncate' && g.failure.conflictIndex === 1,
+    '场景G 截断已提交项被判定为非法截断');
+  const bLog = g.failure.replicas.find((x) => x.node === 'b');
+  expect(bLog.length === 1 && bLog.tail[0].term === 1 && g.snapshots.length === 3,
+    '场景G 失败事件不改状态，保留此前 3 个快照');
+
+  // 场景 H：前驱不匹配 -> predecessor
+  const h = replay({ nodes: ['a', 'b', 'c'], events: [
+    R('b', 1, 1, [{ term: 2 }]),
+  ] });
+  expect(!h.ok && h.failure.category === 'predecessor', '场景H 缺失匹配前驱副本时拒绝追加');
+}
+
+// ---------- 3) 页面构建检查 ----------
+log.step(3, '页面构建检查');
+{
+  const r = await run('node', ['scripts/build.mjs']);
+  if (r.code !== 0) {
+    log.bad('页面构建失败', r.err || r.out);
+  } else {
+    const required = ['index.html', 'app.js', 'styles.css', 'engine.js'];
+    for (const f of required) {
+      try {
+        await access(resolve(ROOT, 'dist', f));
+        log.ok(`产物存在 dist/${f}`);
+      } catch {
+        log.bad(`缺少构建产物 dist/${f}`);
+      }
+    }
+    const html = await readFile(resolve(ROOT, 'dist', 'index.html'), 'utf8');
+    expect(html.includes('成员变更') && html.includes('./app.js'), '页面挂载入口正确');
+    const app = await readFile(resolve(ROOT, 'dist', 'app.js'), 'utf8');
+    expect(app.includes("from './engine.js'"), '页面以 ESM 引入复核引擎');
+  }
+}
+
+// ---------- 4) HTTP 冒烟 ----------
+log.step(4, 'HTTP 冒烟');
+let serverProc = null;
+let base = BASE_URL;
+async function waitHealthy(url, tries = 40) {
+  for (let i = 0; i < tries; i += 1) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+    } catch { /* 重试 */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return null;
+}
+
+try {
+  if (!base) {
+    serverProc = spawn('node', ['server.js'], { cwd: ROOT, env: { ...process.env, PORT: SMOKE_PORT } });
+    serverProc.stdout.on('data', () => {});
+    serverProc.stderr.on('data', () => {});
+    base = `http://127.0.0.1:${SMOKE_PORT}`;
+    console.log(`  · 已在本机拉起静态服务 ${base}`);
+  } else {
+    console.log(`  · 对既有服务进行冒烟 ${base}`);
+  }
+
+  const health = await waitHealthy(`${base}/health`);
+  expect(!!health, '/health 在超时内返回 200');
+  if (health) {
+    const body = await health.json();
+    expect(body.status === 'ok' && body.service === 'membership-trace-reviewer',
+      '健康响应包含服务名与 ok 状态', JSON.stringify(body));
+  }
+
+  for (const path of ['/', '/app.js', '/engine.js', '/styles.css']) {
+    const res = await fetch(`${base}${path}`);
+    expect(res.status === 200, `GET ${path} 返回 200`);
+  }
+  const index = await (await fetch(`${base}/`)).text();
+  expect(index.includes('<!DOCTYPE html>'), '首页返回 HTML');
+  const engineServed = await (await fetch(`${base}/engine.js`)).text();
+  expect(engineServed.includes('export function replay'), '浏览器可加载回放引擎');
+
+  const nf = await fetch(`${base}/../etc/passwd`).then((r) => r.status).catch(() => 'ERR');
+  expect(nf === 400 || nf === 403 || nf === 404, `越权路径被拒绝（${nf}）`);
+} catch (err) {
+  log.bad('HTTP 冒烟异常', err.stack || err.message);
+} finally {
+  if (serverProc) serverProc.kill('SIGTERM');
+}
+
+// ---------- 汇总 ----------
+console.log(`\n[verify] ${failures === 0 ? '全部验收项通过 ✔' : `${failures} 项验收失败 ✘`}`);
+process.exit(failures === 0 ? 0 : 1);

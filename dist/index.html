@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>成员变更复制/提交轨迹复核器</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<header class="topbar">
+  <h1>飞控冗余集群 · 成员变更轨迹复核</h1>
+  <p class="sub">复制与提交轨迹按序回放：前驱匹配追加 / 截断未提交尾部 / 已提交项不可覆盖；
+    joint(old,new) 提交后方可提交 final(new)；联合阶段须同时取得旧、新集合多数。</p>
+</header>
+
+<main>
+  <section class="card" id="input-card">
+    <h2>① 轨迹录入</h2>
+    <div class="row">
+      <label>初始节点（3~5 个，逗号分隔）
+        <input id="nodes-input" type="text" value="n1,n2,n3" spellcheck="false" />
+      </label>
+      <div class="hint">
+        已用：成员变更 <b id="cnt-changes">0</b>/2 次，事件 <b id="cnt-events">0</b>/48 项
+      </div>
+    </div>
+
+    <div class="examples">
+      <span>示例场景：</span>
+      <button data-example="happy3to4">正确：3→4 联合变更</button>
+      <button data-example="oldquorum">失败：缺旧集合多数</button>
+      <button data-example="newquorum">失败：缺新集合多数</button>
+      <button data-example="finalbefore">失败：final 早于 joint</button>
+      <button data-example="prevmismatch">失败：前驱不匹配</button>
+      <button data-example="committedtrunc">失败：截断已提交项</button>
+    </div>
+
+    <div id="event-editor"></div>
+
+    <div class="row btn-row">
+      <button class="primary" id="btn-add-repl">+ 复制事件</button>
+      <button class="primary" id="btn-add-commit">+ 提交事件</button>
+      <button class="go" id="btn-run">▶ 启动浏览器内复核</button>
+      <button id="btn-json">查看 / 导入 JSON</button>
+    </div>
+
+    <div id="json-panel" class="json-panel hidden">
+      <textarea id="json-text" spellcheck="false"></textarea>
+      <div class="row btn-row">
+        <button id="btn-json-apply">应用 JSON 到表单</button>
+        <button id="btn-json-sync">从表单同步 JSON</button>
+      </div>
+    </div>
+    <div id="input-error" class="input-error hidden"></div>
+  </section>
+
+  <section class="card" id="result-card">
+    <h2>② 逐事件回放结果</h2>
+    <div id="result-summary" class="hint">尚未回放。</div>
+    <div id="timeline"></div>
+  </section>
+</main>
+
+<script type="module" src="./app.js"></script>
+</body>
+</html>

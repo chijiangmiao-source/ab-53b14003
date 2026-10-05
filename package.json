@@ -1,0 +1,16 @@
+{
+  "name": "membership-trace-reviewer",
+  "version": "1.0.0",
+  "description": "飞控冗余集群 Raft 联合成员变更复制/提交轨迹浏览器内复核站点",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node server.js",
+    "test": "node test/engine.test.mjs",
+    "verify": "node verify/verify"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
