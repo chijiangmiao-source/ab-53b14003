@@ -1,0 +1,15 @@
+{
+  "name": "quorum-review",
+  "version": "1.0.0",
+  "description": "飞控冗余集群成员变更复制与提交轨迹复核（静态站点 + 一次性验收）",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/",
+    "verify": "node verify.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

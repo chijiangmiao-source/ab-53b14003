@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>飞控冗余集群 · 复制与提交轨迹复核</title>
+  <link rel="stylesheet" href="css/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>飞控冗余集群 · 成员变更轨迹复核台</h1>
+    <p class="sub">复核复制（AppendEntries）与提交事件，确认成员变更期间未以错误多数提交指令。所有计算在浏览器本地完成。</p>
+  </header>
+
+  <main>
+    <section class="card" id="setup-card">
+      <h2>1. 初始节点（3–5 个）</h2>
+      <div class="row">
+        <input id="initial-peers" type="text" value="A, B, C" spellcheck="false"
+               aria-label="初始节点，逗号或空格分隔" />
+        <span class="hint" id="peer-hint"></span>
+      </div>
+
+      <h2>2. 事件序列（至多 48 项，按序执行）</h2>
+      <div class="toolbar">
+        <button type="button" id="add-repl">+ 复制事件</button>
+        <button type="button" id="add-commit">+ 提交事件</button>
+        <span class="spacer"></span>
+        <label class="preset">预置场景：
+          <select id="preset">
+            <option value="">— 选择 —</option>
+            <option value="ok">正常联合变更（joint → final）</option>
+            <option value="joint-quorum">联合阶段新集合多数不足</option>
+            <option value="final-phase">未经 joint 直接提交 final</option>
+            <option value="truncate">非法覆盖已提交项</option>
+          </select>
+        </label>
+        <button type="button" id="btn-clear" class="ghost">清空</button>
+        <button type="button" id="btn-run" class="primary">启动复核</button>
+      </div>
+      <ol id="event-list" class="event-list"></ol>
+      <p class="hint" id="event-hint"></p>
+    </section>
+
+    <section id="result-section" class="card hidden">
+      <h2>3. 回放结果</h2>
+      <div id="setup-error" class="banner error hidden"></div>
+      <div id="failure-panel" class="banner error hidden"></div>
+      <div id="success-panel" class="banner ok hidden"></div>
+      <div id="snapshots"></div>
+    </section>
+  </main>
+
+  <footer>
+    <span>静态站点 · 浏览器内复核 · joint(old,new) 联合多数 / final(new) 配置阶段校验</span>
+  </footer>
+
+  <script type="module" src="js/raft.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
